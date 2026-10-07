@@ -277,21 +277,21 @@ describe('MockMiddleware', () => {
     it('answers on the prefixed path', () => {
       const { res } = invoke(
         [controller('accounts', [method({ name: 'list', httpMethod: 'GET', route: '' })])],
-        { path: '/specscribe-mock/api/accounts', method: 'GET' },
+        { path: '/api/specscribe-mock/accounts', method: 'GET' },
         'api',
       );
 
       expect(res.statusCode).toBe(200);
     });
 
-    it('does not answer on the unprefixed path when a prefix is configured', () => {
+    it('answers on the root mock base too', () => {
       const { res } = invoke(
         [controller('accounts', [method({ name: 'list', httpMethod: 'GET', route: '' })])],
         { path: '/specscribe-mock/accounts', method: 'GET' },
         'api',
       );
 
-      expect(res.statusCode).toBe(404);
+      expect(res.statusCode).toBe(200);
     });
 
     it('handles nested method routes', () => {

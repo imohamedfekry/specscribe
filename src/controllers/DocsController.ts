@@ -15,7 +15,7 @@ import type { Request } from 'express';
 import { renderDocsPage } from '../utils/DocsPageRenderer';
 import { buildScenarioDocument } from '../runner/ScenarioDocument';
 import { SpecScribeLogger } from '../utils/SpecScribeLogger';
-import { getRuntimeGlobalPrefix, liveSpec, requestOrigin } from '../utils/LiveSpec';
+import { getRuntimeGlobalPrefix, liveSpec, requestOrigin, requestVersion } from '../utils/LiveSpec';
 
 export const IS_PUBLIC_KEY = 'isPublic';
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
@@ -105,7 +105,8 @@ export function createDocsController(config: { path?: string } = {}): Type<any> 
      */
     private specFor(req: Request): any {
       const origin = this.options?.baseUrlExplicit ? undefined : requestOrigin(req as any);
-      const key = `${origin ?? ''}|${getRuntimeGlobalPrefix()}`;
+      const version = requestVersion(req as any);
+      const key = `${origin ?? ''}|${getRuntimeGlobalPrefix()}|${version}`;
       let cached = this.liveCache.get(key);
       if (!cached) {
         cached = liveSpec(this.openApiSpec, {
@@ -113,6 +114,7 @@ export function createDocsController(config: { path?: string } = {}): Type<any> 
           runtimePrefix: getRuntimeGlobalPrefix(),
           explicitBaseUrl: !!this.options?.baseUrlExplicit,
           origin,
+          version,
           mockEnabled: !!this.options?.enableMock,
         });
         if (this.liveCache.size > 20) this.liveCache.clear();

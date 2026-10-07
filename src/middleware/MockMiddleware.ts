@@ -48,6 +48,13 @@ function sendJson(res: any, statusCode: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
+// URI-versioned apps serve `/v1/...`; the tables below carry no version,
+// so drop a leading version segment before matching (unversioned URLs pass through).
+function stripVersion(path: string): string {
+  const [head, ...rest] = requestSegments(path);
+  return head && /^v\d+$/i.test(head) ? `/${rest.join('/')}` : path;
+}
+
 interface CompiledRoute {
   controller: ControllerInfo;
   method: MethodInfo;
@@ -68,7 +75,7 @@ export class MockMiddleware implements NestMiddleware {
   ) {
     this.compiledFor = this.effectivePrefix();
     this.mockPrefixes = this.prefixesFor(this.compiledFor);
-    this.routes = this.compileRoutes(this.compiledFor);
+    this.routes = this.compileRoutes();
   }
 
   /** `globalPrefix` from forRoot(), else what `app.setGlobalPrefix()` set. */
@@ -81,12 +88,12 @@ export class MockMiddleware implements NestMiddleware {
   }
 
   use(req: any, res: any, next: any) {
-    // The app's prefix is only final once it is listening; recompile once if it moved.
+    // The app's prefix is only final once it is listening; refresh the base
+    // paths if it moved. (Route tables carry no prefix/version — see compileRoutes.)
     const prefix = this.effectivePrefix();
     if (prefix !== this.compiledFor) {
       this.compiledFor = prefix;
       this.mockPrefixes = this.prefixesFor(prefix);
-      this.routes = this.compileRoutes(prefix);
     }
     const path = requestPath(req);
     const mockPrefix = this.mockPrefixes.find(p => path === p || path.startsWith(`${p}/`));
@@ -95,7 +102,7 @@ export class MockMiddleware implements NestMiddleware {
       return next();
     }
 
-    const apiPath = path.slice(mockPrefix.length) || '/';
+    const apiPath = stripVersion(path.slice(mockPrefix.length) || '/');
     const match = this.findMatchingRoute(apiPath, req.method);
 
     if (!match) {
@@ -121,7 +128,7 @@ export class MockMiddleware implements NestMiddleware {
    * Flattens the scanned controllers into a route table, sorted so that the most
    * specific route is considered first.
    */
-  private compileRoutes(globalPrefix: string): CompiledRoute[] {
+  private compileRoutes(): CompiledRoute[] {
     const routes: CompiledRoute[] = [];
 
     for (const controller of this.controllers) {
@@ -129,11 +136,9 @@ export class MockMiddleware implements NestMiddleware {
         routes.push({
           controller,
           method,
-          // Built through the shared helper so the mock answers on exactly the
-          // path that appears in the generated document.
+          // Matched against the request path with mock base, prefix and an
+          // optional version segment already stripped — hence bare here.
           segments: buildRouteSegments({
-            globalPrefix,
-            version: method.version || controller.version,
             controllerPath: controller.path,
             methodRoute: method.route,
           }),

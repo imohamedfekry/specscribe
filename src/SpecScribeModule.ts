@@ -1,5 +1,5 @@
 /** SpecScribe | Developed by Mohamed Mustafa | MIT License **/
-import { DynamicModule, MiddlewareConsumer, Module, OnModuleInit, RequestMethod, Inject, Optional } from '@nestjs/common';
+import { DynamicModule, MiddlewareConsumer, Module, OnModuleInit, RequestMethod, Inject, Optional, VersioningType } from '@nestjs/common';
 import { ApplicationConfig, HttpAdapterHost } from '@nestjs/core';
 import { getRuntimeGlobalPrefix, normalizePrefix, setRuntimeGlobalPrefix } from './utils/LiveSpec';
 import { ConfigurableModuleClass, MODULE_OPTIONS_TOKEN } from './specscribe.module-definition';
@@ -181,6 +181,10 @@ export class SpecScribeModule extends ConfigurableModuleClass implements OnModul
     const docsPath = SpecScribeModule.docsPath;
     const activePrefix = normalizePrefix(options.globalPrefix) || getRuntimeGlobalPrefix();
     const prefix = activePrefix ? `/${activePrefix}` : '';
+    // URI versioning (`defaultVersion: '1'`) applies to the docs routes too,
+    // so the banner links carry it — read live from the host app.
+    const versionSegment = this.versionSegments()[0];
+    const version = versionSegment ? `/${versionSegment}` : '';
 
     const cyan = '\x1b[36m';
     const purple = '\x1b[35m';
@@ -199,14 +203,14 @@ export class SpecScribeModule extends ConfigurableModuleClass implements OnModul
     lines.push(`${gradient}│${reset} ${cyan}${bold}✨ SpecScribe${reset} ${dim}by Mohamed Mustafa${reset}`);
     lines.push(`${gradient}│${reset}`);
     if (options.enableDocs !== false) {
-      lines.push(`${gradient}│${reset} ${green}●${reset} ${bold}Documentation${reset}  ${cyan}${baseUrl}${prefix}/${docsPath}${reset}`);
-      lines.push(`${gradient}│${reset} ${green}●${reset} ${bold}OpenAPI Spec${reset}   ${cyan}${baseUrl}${prefix}/${docsPath}-json${reset}`);
+      lines.push(`${gradient}│${reset} ${green}●${reset} ${bold}Documentation${reset}  ${cyan}${baseUrl}${prefix}${version}/${docsPath}${reset}`);
+      lines.push(`${gradient}│${reset} ${green}●${reset} ${bold}OpenAPI Spec${reset}   ${cyan}${baseUrl}${prefix}${version}/${docsPath}-json${reset}`);
     } else {
       lines.push(`${gradient}│${reset} ${yellow}○${reset} ${bold}Documentation${reset}  ${dim}disabled in production (enableDocs: true to opt in)${reset}`);
     }
     if (options.enableMock !== false) {
       lines.push(
-        `${gradient}│${reset} ${green}●${reset} ${bold}Mock Server${reset}    ${cyan}${baseUrl}${prefix}/${MOCK_ROUTE_PREFIX}${reset}`,
+        `${gradient}│${reset} ${green}●${reset} ${bold}Mock Server${reset}    ${cyan}${baseUrl}${prefix}/${MOCK_ROUTE_PREFIX}${version}${reset}`,
       );
     } else {
       lines.push(`${gradient}│${reset} ${yellow}○${reset} ${bold}Mock Server${reset}    ${dim}disabled in production (enableMock: true to opt in)${reset}`);
@@ -516,24 +520,56 @@ export class SpecScribeModule extends ConfigurableModuleClass implements OnModul
   }
 
   /**
-   * Builds exact mock routes under `/specscribe-mock`. When a global prefix is set
-   * the mock is mounted under both the prefixed and root paths so existing URLs
-   * keep working.
+   * Registers the mock middleware on the `/specscribe-mock` base paths only.
+   * Sub-paths are matched by the middleware itself (prefix matching works on
+   * every adapter), so no per-route expansion — and no wildcard syntax — is
+   * needed. Empty when nothing was scanned so the middleware stays off.
+   *
+   * NOTE: paths omit the global prefix on purpose — Nest prepends
+   * `app.setGlobalPrefix()` to middleware routes itself.
    */
   private buildExactMockRoutes(controllers: any[], globalPrefix?: string): { path: string; method: RequestMethod }[] {
     const apiRoutes = this.buildExactApiRoutes(controllers, globalPrefix).map(r => r.path);
-    const normalizedPrefix = (globalPrefix || '').replace(/^\/+|\/+$/g, '');
-    const prefixes = normalizedPrefix
-      ? [`${normalizedPrefix}/${MOCK_ROUTE_PREFIX}`, MOCK_ROUTE_PREFIX]
-      : [MOCK_ROUTE_PREFIX];
+    if (apiRoutes.length === 0) return [];
+    const prefix = normalizePrefix(globalPrefix);
+    const versions = this.versionSegments();
+    // Versioned variants first so versioned apps answer on both schemes.
+    const variants = [...versions, ''];
 
     const routes = new Set<string>();
-    for (const prefix of prefixes) {
-      for (const apiRoute of apiRoutes) {
-        routes.add(apiRoute ? `${prefix}/${apiRoute}` : prefix);
+    for (const apiRoute of apiRoutes) {
+      const rest = prefix && apiRoute.startsWith(`${prefix}/`) ? apiRoute.slice(prefix.length + 1) : apiRoute;
+      const clean = rest === prefix ? '' : rest;
+      for (const v of variants) {
+        routes.add([MOCK_ROUTE_PREFIX, v, clean].filter(Boolean).join('/'));
       }
     }
+    // Bare bases so the banner URL reaches the middleware (helpful 404 otherwise).
+    for (const v of versions) routes.add(`${MOCK_ROUTE_PREFIX}/${v}`);
+    routes.add(MOCK_ROUTE_PREFIX);
 
     return Array.from(routes).map(path => ({ path, method: RequestMethod.ALL }));
+  }
+
+  /**
+   * URI version segments from the host app (`defaultVersion: '1'` → `['v1']`).
+   * Empty when versioning is off or not URI-based — static analysis cannot see
+   * `app.enableVersioning()`, but the running app config can.
+   */
+  private versionSegments(): string[] {
+    try {
+      const versioning = this.appConfig?.getVersioning?.() as
+        | { type?: unknown; defaultVersion?: unknown }
+        | undefined;
+      if (!versioning || versioning.type !== VersioningType.URI) return [];
+      const raw = Array.isArray(versioning.defaultVersion)
+        ? versioning.defaultVersion
+        : [versioning.defaultVersion];
+      return raw
+        .filter((v): v is string | number => (typeof v === 'string' || typeof v === 'number') && `${v}`.length > 0)
+        .map(v => `v${v}`);
+    } catch {
+      return [];
+    }
   }
 }

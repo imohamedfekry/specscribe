@@ -36,11 +36,19 @@ export function requestOrigin(req: { headers?: Record<string, unknown>; protocol
   return `${proto}://${host}`;
 }
 
+/** First `vN` URL segment (`/api/v1/docs` → `v1`), if the app versions its routes. */
+export function requestVersion(req: { originalUrl?: string; url?: string }): string {
+  const path = (req?.originalUrl ?? req?.url ?? '').split('?')[0];
+  return path.split('/').filter(Boolean).find(s => /^v\d+$/i.test(s)) ?? '';
+}
+
 export interface LiveSpecInput {
   /** `globalPrefix` passed to forRoot() — already applied to the scanned paths. */
   optionPrefix?: string;
   /** Prefix the running app actually uses (`app.setGlobalPrefix()`). */
   runtimePrefix?: string;
+  /** Version segment detected on the incoming request URL (`v1`), if any. */
+  version?: string;
   /** The user configured `baseUrl` themselves: keep their `servers`. */
   explicitBaseUrl?: boolean;
   /** Origin the docs were requested on. */
@@ -61,13 +69,23 @@ export function liveSpec<T extends { paths?: Record<string, unknown>; servers?: 
   const optionPrefix = normalizePrefix(input.optionPrefix);
   const addPrefix = optionPrefix ? '' : normalizePrefix(input.runtimePrefix);
   const effective = optionPrefix || addPrefix;
+  const version = normalizePrefix(input.version);
   const out: T = { ...spec };
   let changed = false;
 
-  if (addPrefix && spec.paths) {
+  if ((addPrefix || version) && spec.paths) {
+    const base = effective ? `/${effective}` : '';
     const paths: Record<string, unknown> = {};
     for (const [route, item] of Object.entries(spec.paths)) {
-      paths[`/${addPrefix}${route === '/' ? '' : route}` || '/'] = item;
+      let full = route === '/' ? '' : route;
+      if (addPrefix && !full.startsWith(`${base}/`)) full = `${base}${full}`;
+      if (version) {
+        full =
+          base && (full === base || full.startsWith(`${base}/`))
+            ? `${base}/${version}${full.slice(base.length)}`
+            : `/${version}${full}`;
+      }
+      paths[full || '/'] = item;
     }
     out.paths = paths;
     changed = true;
@@ -77,7 +95,7 @@ export function liveSpec<T extends { paths?: Record<string, unknown>; servers?: 
     changed = true;
   }
   if (input.mockEnabled) {
-    (out as Record<string, unknown>)['x-specscribe-mock'] = `${effective ? `/${effective}` : ''}/${input.mockSegment || 'specscribe-mock'}`;
+    (out as Record<string, unknown>)['x-specscribe-mock'] = `${effective ? `/${effective}` : ''}/${input.mockSegment || 'specscribe-mock'}${version ? `/${version}` : ''}`;
     changed = true;
   }
   return changed ? out : spec;
