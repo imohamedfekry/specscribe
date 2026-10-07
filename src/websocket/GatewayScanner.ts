@@ -44,6 +44,94 @@ export interface GatewayInfo {
 }
 
 /**
+ * Reads the event name of a `@SubscribeMessage(...)` argument.
+ *
+ * Literals work as before; references such as `EVENTS.JOIN`,
+ * `EVENTS['JOIN']` or `const E = 'x'` are read from their initializer
+ * through the checker (including imported constants). Anything
+ * unresolvable yields `undefined` so the handler is skipped.
+ */
+function resolveEventName(node: ts.Expression, checker?: ts.TypeChecker): string | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text || undefined;
+  }
+  if (!checker) return undefined;
+  try {
+    if (ts.isPropertyAccessExpression(node)) {
+      return readProperty(checker.getSymbolAtLocation(node.expression), node.name.text, checker);
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const key = node.argumentExpression;
+      if (key && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key))) {
+        return readProperty(checker.getSymbolAtLocation(node.expression), key.text, checker);
+      }
+      return undefined;
+    }
+    if (ts.isIdentifier(node)) {
+      return readVariable(checker.getSymbolAtLocation(node), checker);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+// The string a `const X = '...'` variable was initialized with.
+function readVariable(symbol: ts.Symbol | undefined, checker: ts.TypeChecker): string | undefined {
+  for (const decl of targetDeclarations(symbol, checker)) {
+    if (ts.isVariableDeclaration(decl) && decl.initializer) {
+      const text = readLiteral(unwrap(decl.initializer));
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
+// The string a `const O = { KEY: '...' }` property was initialized with.
+function readProperty(symbol: ts.Symbol | undefined, name: string, checker: ts.TypeChecker): string | undefined {
+  for (const decl of targetDeclarations(symbol, checker)) {
+    if (!ts.isVariableDeclaration(decl) || !decl.initializer) continue;
+    const init = unwrap(decl.initializer);
+    if (!ts.isObjectLiteralExpression(init)) continue;
+    for (const prop of init.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const key = ts.isIdentifier(prop.name) ? prop.name.text : readLiteral(prop.name);
+      if (key !== name) continue;
+      const text = readLiteral(unwrap(prop.initializer));
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
+// Declarations behind a symbol, following import aliases.
+function targetDeclarations(symbol: ts.Symbol | undefined, checker: ts.TypeChecker): readonly ts.Declaration[] {
+  if (!symbol) return [];
+  let target = symbol;
+  try {
+    if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) target = checker.getAliasedSymbol(symbol);
+  } catch {
+    // Not an alias — use the symbol as is.
+  }
+  return target.getDeclarations() ?? [];
+}
+
+function unwrap(node: ts.Expression): ts.Expression {
+  let current = node;
+  while (ts.isAsExpression(current) || ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function readLiteral(node: ts.Node): string | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text || undefined;
+  }
+  return undefined;
+}
+
+/**
  * Scans a NestJS source tree for WebSocket gateways using the same static
  * analysis approach as the HTTP scanner: no runtime, no decorator metadata,
  * just the TypeScript AST and type checker.
@@ -157,7 +245,13 @@ export class GatewayScanner {
 
     const args = getDecoratorArguments(subscribe);
     const first = args[0];
-    if (!first || !ts.isStringLiteral(first)) return null;
+    if (!first) return null;
+    // String literals keep working as before; constants such as
+    // `@SubscribeMessage(COLLAB_EVENTS.JOIN)` are resolved through the
+    // type checker. Unresolvable expressions are skipped.
+    const checker = (analyzer as unknown as { checker?: ts.TypeChecker }).checker;
+    const eventName = resolveEventName(first, checker);
+    if (!eventName) return null;
 
     // The payload is the `@MessageBody()` parameter. Without the decorator the
     // first non-socket parameter is the best available guess.
@@ -174,7 +268,7 @@ export class GatewayScanner {
     const [firstLine, ...rest] = (text || '').split('\n');
 
     return {
-      event: first.text,
+      event: eventName,
       methodName: method.name.getText(),
       payloadType: payloadParam ? analyzer.analyzeType(analyzer.typeOf(payloadParam)) : undefined,
       returnType: analyzer.analyzeType(analyzer.returnTypeOf(method)),
